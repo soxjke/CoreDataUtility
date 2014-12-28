@@ -12,6 +12,8 @@
 #import "OpenFileSheetController.h"
 #import "MFLCoreDataEditorProjectLoader.h"
 
+NSString* const APPLICATIONS_DIR = @"/Applications/";
+
 @interface MFLAppDelegate ()
 
 @property (strong) OpenFileSheetController *openFileSheetController;
@@ -24,32 +26,12 @@
 
 
 - (BOOL) openFileHelper: (NSString*) filename {
-    if ([filename hasSuffix:MFL_COREDATA_PROJECT_EXTENSION]) {        
-        
-        NSLog(@"Load Project File: [%@]", filename);
-        NSDictionary* project = [NSDictionary dictionaryWithContentsOfFile:filename];
-        NSString* momFilePath = project[MFL_MOM_FILE_KEY];
-        NSString* dbFilePath = project[MFL_DB_FILE_KEY];
-        NSNumber* persistenceFormat = project[MFL_DB_FORMAT_KEY];
-        if (persistenceFormat == nil) {
-            persistenceFormat = @MFL_SQLiteStoreType;
-        }
-        
-        NSURL* momUrl = nil;
-        NSURL* dbUrl = nil;
-        if (momFilePath != nil) {
-            momUrl = [NSURL URLWithString:momFilePath];
-        }
-        
-        if (dbFilePath != nil) {
-            dbUrl = [NSURL URLWithString:dbFilePath];
-        }
-        BOOL result = [self.mainWindowController openFiles: momUrl persistenceFile:dbUrl persistenceType:[persistenceFormat intValue]];
-        
+    if ([filename hasSuffix:MFL_COREDATA_PROJECT_EXTENSION]) {
+        BOOL result = [self.mainWindowController openProject:filename];
         if (result)
         {
             [self addRecentDocument:[NSURL fileURLWithPath:filename]];
-            self.projectHasChanged = true;
+            self.projectHasChanged = NO;
         }
         
         return result;
@@ -72,7 +54,7 @@
             
             NSNumber* persistenceFormat = newValues[MFL_DB_FORMAT_KEY];
             if (persistenceFormat == nil) {
-                persistenceFormat = @MFL_SQLiteStoreType;
+                persistenceFormat = [NSNumber numberWithInt:MFL_SQLiteStoreType];
             }
             
             BOOL result = [self.mainWindowController openFiles:newValues[MFL_MOM_FILE_KEY] persistenceFile:newValues[MFL_DB_FILE_KEY] persistenceType:[persistenceFormat intValue]];
@@ -80,7 +62,7 @@
             if (result)
             {
                 [self addRecentDocument:[NSURL fileURLWithPath:filename]];
-                self.projectHasChanged = true;
+                self.projectHasChanged = YES;
             }
         }
         
@@ -100,6 +82,8 @@
         if (project == nil) {
             NSBeep();
             return NO;
+        } else {
+            self.projectHasChanged = NO;
         }
         
         self.openFileSheetController = [[OpenFileSheetController alloc] initWithWindowNibName:@"OpenFileSheetController"];
@@ -110,7 +94,7 @@
             
             NSNumber* persistenceFormat = newValues[MFL_DB_FORMAT_KEY];
             if (persistenceFormat == nil) {
-                persistenceFormat = @MFL_SQLiteStoreType;
+                persistenceFormat = [NSNumber numberWithInt:MFL_SQLiteStoreType];
             }
             
             BOOL result = [self.mainWindowController openFiles:newValues[MFL_MOM_FILE_KEY] persistenceFile:newValues[MFL_DB_FILE_KEY] persistenceType:[persistenceFormat intValue]];
@@ -118,7 +102,7 @@
             if (result)
             {
                 [self addRecentDocument:[NSURL fileURLWithPath:filename]];
-                self.projectHasChanged = true;
+                self.projectHasChanged = YES;
             }
         }
         
@@ -137,8 +121,10 @@
         self.mainWindowController = [[MFLMainWindowController alloc] initWithWindowNibName:@"MFLMainWindowController"];
     }
     
-    [self setWindow:[self.mainWindowController window]];
+    [self handleLaunchArguments:[ [NSProcessInfo processInfo] arguments] ];
     
+    [self setWindow:[self.mainWindowController window]];
+
     // Open previously opened file
     if ([self.mainWindowController momFileUrl] == nil) {
         NSDocumentController *controller = [NSDocumentController sharedDocumentController];
@@ -150,7 +136,7 @@
             [self openFileHelper:[documents[0] path]];
             if ([[documents[0] absoluteString] hasSuffix:MFL_COREDATA_PROJECT_EXTENSION])
             {
-                self.projectHasChanged = false;
+                self.projectHasChanged = NO;
             }
         }
         else
@@ -158,8 +144,95 @@
             [self newAction:aNotification];
         }
     }
+
+    // bring app to foreground
+    [NSApp activateIgnoringOtherApps:YES];
 }
 
++ (NSUInteger)indexOfArgument:(NSString *)argumentName inArguments:(NSArray *)arguments
+{
+    NSUInteger result = NSNotFound;
+    for (NSUInteger index = 0; index < arguments.count; index ++)
+    {
+        NSString *argument;
+        if ( [ [arguments objectAtIndex:index] isKindOfClass:[NSString class] ] )
+        {
+            argument = [arguments objectAtIndex:index];
+        }
+        
+        if ( [argument isEqualToString:argumentName] )
+        {
+            result = index;
+            break;
+        }
+    }
+    return result;
+}
+
++ (NSString *)getValueForArgument:(NSString *)argumentName inArguments:(NSArray *)arguments
+{
+    NSString *result;
+    
+    NSUInteger argumentIndex = [self indexOfArgument:argumentName inArguments:arguments];
+    if (argumentIndex != NSNotFound)
+    {
+        if (argumentIndex + 1 < arguments.count)
+        {
+            if ( [ [arguments objectAtIndex:argumentIndex + 1] isKindOfClass:[NSString class] ] )
+            {
+                result = [arguments objectAtIndex:argumentIndex + 1];
+            }
+        }
+    }
+    
+    return result;
+}
+
+- (void)handleLaunchArguments:(NSArray *)launchArguments
+{
+    NSUInteger helpIndex = [MFLAppDelegate indexOfArgument:@"--help" inArguments:launchArguments];
+    if (helpIndex != NSNotFound)
+    {
+        NSLog(@"Command Line Usage:");
+        NSLog(@"--model FILE \t\t (Required) Specify the location of the model file");
+        NSLog(@"--store FILE \t\t (Required) Specify the location of the persistent store file");
+        NSLog(@"--storeType TYPE \t\t (Required) Specify the type of the persistent store file, types include: SQLite, XML, Binary");
+        exit(0);
+    } else
+    {
+        NSURL *model = [NSURL URLWithString:[MFLAppDelegate getValueForArgument:@"--model" inArguments:launchArguments] ];
+        NSURL *store = [NSURL URLWithString:[MFLAppDelegate getValueForArgument:@"--store" inArguments:launchArguments] ];
+        MFL_StoreTypes storeFormat = 0;
+        BOOL storeFormatSet = NO;
+
+        NSString *storeFormatString = [MFLAppDelegate getValueForArgument:@"--storeType" inArguments:launchArguments];
+        if (storeFormatString)
+        {
+            if ( [storeFormatString isEqualToString:@"SQLite"] )
+            {
+                storeFormat = MFL_SQLiteStoreType;
+                storeFormatSet = YES;
+            } else if ( [storeFormatString isEqualToString:@"XML"] )
+            {
+                storeFormat = MFL_XMLStoreType;
+                storeFormatSet = YES;
+            } else if ( [storeFormatString isEqualToString:@"Binary"] )
+            {
+                storeFormat = MFL_BinaryStoreType;
+                storeFormatSet = YES;
+            }
+        }
+        
+        if (model && store && storeFormatSet)
+        {
+            BOOL result = [self.mainWindowController openFiles:model persistenceFile:store persistenceType:(NSInteger)storeFormat];
+            
+            if (result) {
+                self.projectHasChanged = YES;
+            }
+        }
+    }
+}
 
 - (BOOL)application:(NSApplication *)theApplication openFile:(NSString *)filename
 {
@@ -204,13 +277,13 @@
         
         NSNumber* persistenceFormat = newValues[MFL_DB_FORMAT_KEY];
         if (persistenceFormat == nil) {
-            persistenceFormat = @MFL_SQLiteStoreType;
+            persistenceFormat = [NSNumber numberWithInt:MFL_SQLiteStoreType];
         }
         
         BOOL result = [self.mainWindowController openFiles:newValues[MFL_MOM_FILE_KEY] persistenceFile:newValues[MFL_DB_FILE_KEY] persistenceType:[persistenceFormat intValue]];
 
         if (result) {
-            self.projectHasChanged = true;
+            self.projectHasChanged = YES;
         }
     }
 }
@@ -285,14 +358,17 @@
                                          MFL_MOM_FILE_KEY: [momfileUrl absoluteString],
                                          MFL_DB_FORMAT_KEY: @((int)persistenceType),
                                          MFL_DB_FILE_KEY: [persistenceUrl absoluteString]};
-            
-            if (![stuffToSave writeToURL:[saveDlg URL] atomically:NO])
+
+            NSURL *saveUrl = [saveDlg URL];
+            if (![stuffToSave writeToURL:saveUrl atomically:NO])
             {
                 NSLog(@"Error in saving file!");
             }
             else
             {
-                [self addRecentDocument:[saveDlg URL]];
+                [self addRecentDocument:saveUrl];
+
+                [self.mainWindowController setProjectFile:saveUrl.absoluteString];
             }
             self.projectHasChanged = NO;
         } else {
@@ -305,7 +381,7 @@
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
     if (self.projectHasChanged) {
-        //Promt user to save project before exiting
+        //Prompt user to save project before exiting
         NSString *question = NSLocalizedString(@"Core Data Pro project not saved. Quit without saving?", @"UnsavedProjectChanges");
         NSString *info = NSLocalizedString(@"Quitting now will lose any changes you have made since the last successful save", @"QuitDiscardsChangesText");
         NSString *quitButton = NSLocalizedString(@"Exit", @"QuitAnywayButtonText");
@@ -358,5 +434,6 @@
 {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/yepher/CoreDataUtility/issues"]];
 }
+
 
 @end

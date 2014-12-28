@@ -28,8 +28,7 @@
 }
 
 - (NSDictionary*) decodeProjectFile: (NSString*) projectFilePath {
-    NSLog(@"TODO: decode core data editor project file...");
-    
+   
     NSURL *modelURL = [[NSBundle mainBundle] URLForResource:@"CoreData" withExtension:@"ext"];
     NSManagedObjectModel* managedObjectModel = [[NSManagedObjectModel alloc] initWithContentsOfURL:modelURL];
     if (!managedObjectModel) {
@@ -58,7 +57,7 @@
         NSURL* storeURL = [object valueForKey:@"storeURL"];
         
         NSLog(@"modelURL: %@\nstoreURL: %@",modelURL, storeURL);
-        NSDictionary* newValues = @{MFL_DB_FORMAT_KEY: @MFL_SQLiteStoreType,
+        NSDictionary* newValues = @{MFL_DB_FORMAT_KEY: [NSNumber numberWithInt:MFL_SQLiteStoreType],
                                    MFL_MOM_FILE_KEY: [modelURL path],
                                    MFL_DB_FILE_KEY: [storeURL path]};
         

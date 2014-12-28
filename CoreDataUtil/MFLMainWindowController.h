@@ -15,6 +15,14 @@
 @class EntityTableView;
 @class EntityDataTableView;
 
+typedef NS_ENUM(NSUInteger, EViewType) {
+ ViewTypeString = 0,
+ ViewTypeNumber,
+ ViewTypeDate,
+ ViewTypeLink,
+ ViewTypeTransformable,
+};
+
 @interface MFLMainWindowController : NSWindowController <NSTableViewDataSource, NSTableViewDelegate, MFLCoreDataIntrospectionDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate, EntityTableViewDataSource>
 
 @property (weak) IBOutlet EntityTableView *dataSourceList;
@@ -24,9 +32,12 @@
 @property (weak) IBOutlet NSMatrix *preferenceSheetMatrix;
 @property (weak) IBOutlet NSTextField *generatedPredicateLabel;
 @property (weak) IBOutlet NSSegmentedControl *historySegmentedControl;
+@property (nonatomic) NSString *projectFile;
 
 //- (BOOL)application:(NSApplication *)theApplication openFile:(NSString *)filename;
 - (BOOL) openFiles:(NSURL*) momFile persistenceFile:(NSURL*) persistenceFile persistenceType: (NSInteger) persistenceType;
+
+- (BOOL)openProject:(NSString *)filename;
 
 - (NSURL*) momFileUrl;
 - (NSURL*) persistenceFileUrl;

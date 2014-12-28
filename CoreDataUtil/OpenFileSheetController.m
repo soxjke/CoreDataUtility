@@ -8,8 +8,7 @@
 
 #import "OpenFileSheetController.h"
 #import "MFLConstants.h"
-
-#define URL_FILE_BEGINNING @"file://localhost"
+#import "SimulatorItem.h"
 
 @interface OpenFileSheetController ()
 
@@ -19,6 +18,7 @@
 @property (strong) NSDictionary *savedFields;
 @property (strong) NSArray *processList;
 @property (strong) NSMutableArray *simulatorUrlList;
+@property (weak) IBOutlet NSOutlineView *simulatorSourceList;
 
 - (void)initializeTab;
 - (void)showOrHideOpenButton;
@@ -95,7 +95,7 @@
 - (void)windowDidLoad
 {
     [super windowDidLoad];
-    NSLog(@"windowDidLoad");
+    NSLog(@"%s", __FUNCTION__);
     
     if (self.initialValues != nil)
     {
@@ -232,7 +232,7 @@
     }
 }
 
-- (NSSet *)filesWithExtension:(NSString*)dir :(NSString *)extension
+- (NSOrderedSet *)filesWithExtension:(NSString*)dir :(NSString *)extension
 {
     NSLog(@"Scanning: %@", dir);
     
@@ -299,7 +299,7 @@
     return MFL_SQLiteStoreType;
  }
 
-- (void)handleMomSelection:(NSSet *)momFiles modelTextField:(NSTextField *)modelTextField
+- (void)handleMomSelection:(NSOrderedSet *)momFiles modelTextField:(NSTextField *)modelTextField
 {
     if ([momFiles count] <= 0)
     {
@@ -313,7 +313,7 @@
     }
     else if ([momFiles count] == 1)
     {
-        NSString* momFile = [momFiles anyObject];
+        NSString* momFile = [momFiles firstObject];
         if ([momFile hasPrefix:@"/"]) {
             self.momFileUrl = [NSURL fileURLWithPath:momFile];
         } else {
@@ -515,7 +515,16 @@
     [self.processSelectorBox setLineBreakMode:NSLineBreakByTruncatingMiddle];
     [self.processSelectorBox setPlaceholderString:@"Select Managed Object Model"];
     
-    NSURL* simulatorUrl = [[self applicationSupportDirectory] URLByAppendingPathComponent:@"iPhone Simulator"];
+    NSURL* simulatorUrl = nil; //[[self applicationSupportDirectory] URLByAppendingPathComponent:@"iPhone Simulator"];
+    //SimulatorItem* simulatorItem = [self.simulatorSourceList itemAtRow:[self.simulatorSourceList selectedRow]];
+    if ([self.simulatorTabModelTextField stringValue] == nil || [[self.simulatorTabModelTextField stringValue] length] == 0) {
+        NSLog(@"TODO: prompt user to select an app first.");
+        NSBeep();
+        return;
+    } else {
+        simulatorUrl = [NSURL URLWithString: [self.simulatorTabModelTextField stringValue]];
+    }
+    
     
     NSSet* paths = [self filesWithExtension:[simulatorUrl path] :MFL_MOM_FILE_EXTENSION];
     NSMutableArray* apps = [NSMutableArray arrayWithCapacity:0];
@@ -565,8 +574,46 @@
 
 - (IBAction)tabStoreFileButtonAction:(id)sender
 {
-    NSTextField* storeTextField = [self currentPersistenceTextField];
-    [self selectDbFileButtonAction:self.simulatorTabModelTextField persistenceTextField:storeTextField directoryURL:nil];
+    if (currentTab == SimulatorTab) {
+        SimulatorItem* simulatorItem = [self.simulatorSourceList itemAtRow:[self.simulatorSourceList selectedRow]];
+        if (simulatorItem.itemType != MFLAppItem) {
+            NSLog(@"TODO: prompt user to select app first.");
+            NSBeep();
+            return;
+        }
+        
+        NSURL* directoryURL = [NSURL URLWithString:simulatorItem.documentsFolder];
+        NSOpenPanel* openDlg = [NSOpenPanel openPanel];
+        if (directoryURL != nil) {
+            [openDlg setDirectoryURL:directoryURL];
+        } else {
+            [openDlg setDirectoryURL:self.momFileUrl];
+        }
+        
+        [openDlg setCanChooseFiles:YES];
+        
+        if ([openDlg runModal] == NSOKButton)
+        {
+            NSString *fileString = [[openDlg URLs][0] absoluteString];
+            if ([fileString hasSuffix:MFL_COREDATA_PROJECT_EXTENSION])
+            {
+                NSDictionary *filePaths = [[NSDictionary alloc] initWithContentsOfURL:[openDlg URLs][0]];
+                self.dbFileUrl = [NSURL URLWithString:filePaths[MFL_DB_FILE_KEY]];
+                [[self currentPersistenceTextField] setStringValue:[self.dbFileUrl relativePath]];
+            }
+            else
+            {
+                self.dbFileUrl = [openDlg URLs][0];
+                [[self currentPersistenceTextField] setStringValue:[self.dbFileUrl relativePath]];
+            }
+            
+            [self showOrHideOpenButton];
+        }
+        
+    } else {
+        NSTextField* storeTextField = [self currentPersistenceTextField];
+        [self selectDbFileButtonAction:self.simulatorTabModelTextField persistenceTextField:storeTextField directoryURL:nil];
+    }
 }
 
 - (IBAction)tabStoreApplicationSupportButtonAction:(id)sender
@@ -725,7 +772,7 @@
     {
         self.savedFields = @{MFL_MOM_FILE_KEY: self.momFileUrl,
                             MFL_DB_FILE_KEY: self.dbFileUrl,
-                            MFL_DB_FORMAT_KEY: [NSNumber numberWithInt:[self persistFileFormat]]};
+                            MFL_DB_FORMAT_KEY: [NSNumber numberWithLong:[self persistFileFormat]]};
     }
     else
     {
@@ -733,6 +780,13 @@
     }
     
 	return self.savedFields;
+}
+
+- (IBAction) simulatorInfo: (id) sender {
+    NSLog(@"SimulatorInfo selected");
+    
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/yepher/CoreDataUtility#xcode-6-and-ios-simulator-project-files"]];
+    
 }
 
 #pragma mark
@@ -755,5 +809,55 @@
     
     [self initializeTab];
 }
+
+#pragma mark - NSOutlineView
+
+- (NSInteger)outlineView:(NSOutlineView *)outlineView numberOfChildrenOfItem:(id)item {
+    NSInteger rowCount =  (item == nil) ? 1 : [item numberOfChildren];
+    return rowCount;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item {
+    BOOL result = (item == nil) ? YES : ([item numberOfChildren] != -1);
+    return result;
+}
+
+- (id)outlineView:(NSOutlineView *)outlineView child:(NSInteger)index ofItem:(id)item {
+    id result = (item == nil) ? [SimulatorItem rootItem] : [(SimulatorItem *)item childAtIndex:index];
+    //NSLog(@"%s: %@", __FUNCTION__, result);
+    return result;
+}
+
+- (NSView *)outlineView:(NSOutlineView *)outlineView viewForTableColumn:(NSTableColumn *)tableColumn item:(id)item {
+    NSTableCellView* result = [outlineView makeViewWithIdentifier:@"simulatorRow" owner:self];
+    SimulatorItem* simItem = (SimulatorItem*) item;
+    result.textField.stringValue = simItem.label;
+    if ([item itemType] == MFLRootItem) {
+        //[outlineView expandItem:item];
+    }
+    return result;
+}
+
+// Delegate methods
+
+- (BOOL)outlineView:(NSOutlineView *)outlineView shouldEditTableColumn:(NSTableColumn *)tableColumn item:(id)item {
+    return NO;
+}
+
+- (void)outlineViewSelectionDidChange:(NSNotification *)notification {
+    //NSLog(@"Item Selected: %@", notification);
+    
+    SimulatorItem* simulatorItem = [self.simulatorSourceList itemAtRow:[self.simulatorSourceList selectedRow]];
+    if (simulatorItem.itemType == MFLAppItem) {
+        NSLog(@"Selected Application: %@", simulatorItem.label);
+        //self.momFileUrl = [NSURL URLWithString:simulatorItem.fullPath];
+        [self.simulatorTabModelTextField setStringValue:simulatorItem.fullAppPath];
+        [self showOrHidePersistenceButtons];
+        //NSLog(@"Documents: %@", simulatorItem.documentsFolder);
+        //[self.currentPersistenceTextField setStringValue:simulatorItem.documentsFolder];
+    }
+}
+
+
 
 @end

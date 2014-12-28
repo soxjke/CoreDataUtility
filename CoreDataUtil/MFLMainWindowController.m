@@ -7,19 +7,28 @@
 //
 
 #import "MFLMainWindowController.h"
+#import "CoreDataUtilityStyle.h"
 #import "MFLConstants.h"
-#import "MFLCoreDataIntrospection.h"
-#import "EntityTableView.h"
 #import "EntityDataTableView.h"
 #import "MFLTextTableCellView.h"
 #import "MFLEntityTableCellView.h"
-#import "MFLButtonTableViewCell.h"
-#import "MFLCellBuilder.h"
 #import "OpenFileSheetController.h"
 #import "GetInfoSheetController.h"
 #import "FetchRequestInfoController.h"
+#import "ObjectInfoController.h"
+#import "MFLUtils.h"
+#import "NSDate+TimeAgo.h"
 
-#define kEntitiesRootNode @"rootNode"
+// max length of text to display in cell
+static const int MAX_TEXT_LENGTH = 255;
+
+@interface ViewData : NSObject
+@property NSString *text;
+@property EViewType viewType;
+@end
+
+@implementation ViewData
+@end
 
 @interface OutlineViewNode : NSObject
 @property (strong) OutlineViewNode *parent;
@@ -63,13 +72,10 @@
 @property (strong) NSArray* baseRowTemplates;
 @property (weak) IBOutlet NSPredicateEditor *predicateEditor;
 @property (strong) OutlineViewNode *rootNode;
+@property NSDateFormatter *dateFormatter;
 
-- (void) loadUserDefinedDateFormat;
-- (BOOL)canEnableBackHistoryControl;
-- (BOOL)canEnableForwardHistoryControl;
-- (void)enableDisableHistorySegmentedControls;
-- (void)reloadEntityDataTable:(NSString *)name predicate:(NSPredicate *)predicate type:(MFLObjectType)type;
-- (NSEntityDescription *)getEntityForPredicateEditor;
+// map of row (NSNumber) to NSMutableDictionary (which is a map of column name to ViewData)
+@property NSMutableDictionary *cachedRows;
 
 @end
 
@@ -80,13 +86,10 @@
 {
     self = [super initWithWindow:window];
     if (self) {
-        
         self.sortType = Unsorted;
     }
-    
     return self;
 }
-
 
 - (void) loadUserDefinedDateFormat {
     NSInteger dateStyleDefault = [[NSUserDefaults standardUserDefaults] integerForKey:DATE_STYLE_KEY_NAME]; 
@@ -120,7 +123,6 @@
     }
 }
 
-
 - (void)windowDidLoad
 {
     [super windowDidLoad];
@@ -134,6 +136,8 @@
     [self.historySegmentedControl setEnabled:NO forSegment:1];
     
     [self loadUserDefinedDateFormat];
+
+    self.cachedRows = [NSMutableDictionary new];
 }
 
 #pragma mark -
@@ -150,14 +154,9 @@
     [[newColumn headerCell] setTextColor:[NSColor darkGrayColor]];
     [[newColumn headerCell] setAlignment:NSCenterTextAlignment];
     
-    
-    CGFloat defaultColWidth = [newColumn width];
+    //CGFloat defaultColWidth = [newColumn width];
     [newColumn sizeToFit];
-    if ([newColumn width] < defaultColWidth)
-    {
-        [newColumn setMinWidth:defaultColWidth];
-    }
-    
+
     [[self entityContentTable] addTableColumn:newColumn];
     
     // TODO: we should set the cells up with proper types when we allow users to edit data
@@ -185,6 +184,9 @@
     {
         [self.entityContentTable removeTableColumn:[self.entityContentTable tableColumns][0]];
     }
+
+    // clear cache
+    [self.cachedRows removeAllObjects];
     //NSLog(@"There are now %ld columns", [[self entityContentTable] numberOfColumns]);
 }
 
@@ -221,13 +223,15 @@
 }
 
 - (void) resotreEntitySelectionForHistoryObject:(CoreDataHistoryObject *)historyObject {
-    OutlineViewNode *(^__weak __block find)(OutlineViewNode *, NSString *) = ^OutlineViewNode *(OutlineViewNode *node, NSString *title) {
+    OutlineViewNode *(^find)(OutlineViewNode *, NSString *);
+    __block OutlineViewNode *(^ __weak findWeak)(OutlineViewNode *, NSString *);
+    findWeak = find = ^OutlineViewNode *(OutlineViewNode *node, NSString *title) {
         if ([node.title isEqualToString:title]) {
             return node;
         }
         
         for (OutlineViewNode *child in node.childs) {
-            OutlineViewNode *result = find(child, title);
+            OutlineViewNode *result = findWeak(child, title);
             if (result) {
                 return result;
             }
@@ -249,50 +253,63 @@
 - (void)tableViewSelectionDidChange:(NSNotification *)aNotification
 {
     //NSLog(@"- (void)tableViewSelectionDidChange:[%@]", aNotification);
-    
     if ([self.dataSourceList isEqualTo:[aNotification object]])
     {
-        if ([self.dataSourceList selectedRow] >= 0)
-        {
-            [self removeColumns];
-            [self.coreDataIntrospection clearEntityData];
-            [self.entityContentTable reloadData];
-            
-            self.sortType = Unsorted;
-            OutlineViewNode *selectedNode = [self.dataSourceList itemAtRow:[self.dataSourceList selectedRow]];
-            
-            NSInteger selected = selectedNode.index;
-			NSInteger section = selectedNode.parent.index;
-            NSLog(@"Selected idx=%ld", selected);
-            if (selected >= 0 && section == 0)
-            {
-                [self.coreDataIntrospection loadEntityDataAtIndex:selected];
-                NSArray* columnNames = [self.coreDataIntrospection entityFieldNames:[self.coreDataIntrospection entityAtIndex:selected]];
-                for (NSString* name in columnNames)
-                {
-                    [self addTableColumnWithIdentifier:name];
-                }
-                
-                [self.coreDataIntrospection loadEntityDataAtIndex:selected];
-				[self.coreDataIntrospection updateCoreDataHistory:[self.coreDataIntrospection entityAtIndex:selected] predicate:nil objectType:MFLObjectTypeEntity];
+        [self onEntitySelected];
+    }
+}
 
-            } else if (selected >= 0 && section == 1)
-			{
-				NSFetchRequest *fetch = [self.coreDataIntrospection fetchRequest:selected];
-                NSArray* columnNames = [self.coreDataIntrospection entityFieldNames:[fetch.entity name]];
-                for (NSString* name in columnNames)
-                {
-                    [self addTableColumnWithIdentifier:name];
-                }
-				[self.coreDataIntrospection executeFetch:fetch];
-				[self.coreDataIntrospection updateCoreDataHistory:[self.coreDataIntrospection fetchRequestAtIndex:selected]
-														predicate:[[self.coreDataIntrospection fetchRequest:selected] predicate]
-													   objectType:MFLObjectTypeFetchRequest];
-			}
-            [self.entityContentTable reloadData];
-            
-            [self enableDisableHistorySegmentedControls];
+- (void)onEntitySelected {
+    if ([self.dataSourceList selectedRow] >= 0)
+    {
+        NSTimeInterval startTime = [[NSDate date] timeIntervalSince1970];
+        [self.coreDataIntrospection clearEntityData];
+        [self.entityContentTable reloadData];
+
+        [self.entityContentTable beginUpdates];
+        [self removeColumns];
+
+        self.sortType = Unsorted;
+        OutlineViewNode *selectedNode = [self.dataSourceList itemAtRow:[self.dataSourceList selectedRow]];
+
+        NSInteger selected = selectedNode.index;
+        NSInteger section = selectedNode.parent.index;
+        if (selected >= 0 && section == 0)
+        {
+            [self.coreDataIntrospection loadEntityDataAtIndex:selected];
+            NSArray* columnNames = [self.coreDataIntrospection entityFieldNames:[self.coreDataIntrospection entityAtIndex:selected]];
+            for (NSString* name in columnNames)
+            {
+                [self addTableColumnWithIdentifier:name];
+            }
+
+            // TODO - why was this called twice?
+            //[self.coreDataIntrospection loadEntityDataAtIndex:selected];
+            [self.coreDataIntrospection updateCoreDataHistory:[self.coreDataIntrospection entityAtIndex:selected] predicate:nil objectType:MFLObjectTypeEntity];
+
+        } else if (selected >= 0 && section == 1)
+        {
+            NSFetchRequest *fetch = [self.coreDataIntrospection fetchRequest:selected];
+            NSArray* columnNames = [self.coreDataIntrospection entityFieldNames:[fetch.entity name]];
+            for (NSString* name in columnNames)
+            {
+                [self addTableColumnWithIdentifier:name];
+            }
+            [self.coreDataIntrospection executeFetch:fetch];
+            [self.coreDataIntrospection updateCoreDataHistory:[self.coreDataIntrospection fetchRequestAtIndex:selected]
+                                                    predicate:[[self.coreDataIntrospection fetchRequest:selected] predicate]
+                                                   objectType:MFLObjectTypeFetchRequest];
         }
+
+        [self.entityContentTable endUpdates];
+
+        // allow main thread to return before calling reloadData again. user will see a faster table selection & an empty table view - then data will populate
+        [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+            [self.entityContentTable reloadData];
+        }];
+
+        [self enableDisableHistorySegmentedControls];
+        NSLog(@"Selected %@, selected=%d, section:%d, %@ms", selectedNode.title, (int)selected, (int)section, [MFLUtils duration:startTime]);
     }
 }
 
@@ -322,7 +339,10 @@
         [self.coreDataIntrospection setDateStyle:self.dateStyle];
         [self.coreDataIntrospection sortEntityData:[tableColumn identifier]];
     }
-    
+
+    // clear cache
+    [self.cachedRows removeAllObjects];
+
     [self.entityContentTable setIndicatorImage:[NSImage imageNamed:arrowImageName] inTableColumn:tableColumn];
     [self.entityContentTable reloadData];
 }
@@ -355,24 +375,9 @@
 
 - (id)getValueObjFromDataRows:(NSTableView *)tableView :(NSInteger)row :(NSTableColumn *)tableColumn
 {
-    NSArray* dataRow;
     NSInteger normalizedRow = [self sortOrderedRow:tableView row:row];
-    
-    id valueObj = nil;
-    @try
-    {
-        dataRow = [self.coreDataIntrospection getDataAtRow:normalizedRow];
-        
-        valueObj = [dataRow valueForKey:[tableColumn identifier]];
-    }
-    @catch (NSException *exception)
-    {
-        // Not sure what is going on here. This happens sometimes. We need to sort this one out...
-        NSLog(@"Row=%ld, normalizedRow=%ld, numRows=%ld, entityCount=%ld", row, normalizedRow, [self.entityContentTable numberOfRows], [self.coreDataIntrospection entityDataCount]);
-        NSLog(@"Row[%ld]: Caught Exception: %@ [%@], %@",row, exception, tableColumn, dataRow);
-        valueObj = nil;
-    }
-    
+    NSArray *dataRow = [self.coreDataIntrospection getDataAtRow:(NSUInteger)normalizedRow];
+    id valueObj = [dataRow valueForKey:[tableColumn identifier]];
     return valueObj;
 }
 
@@ -386,146 +391,189 @@
     return normalizedRow;
 }
 
+- (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
+    return 20;
+}
+
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{    
+{
     if (tableView == [self dataSourceList])
     {
         MFLEntityTableCellView* entityCell = [tableView makeViewWithIdentifier:MFL_ENTITY_CELL owner:self];
         NSString* lblTxt = [self.coreDataIntrospection entityAtIndex:row];
-        
+
         [[entityCell label] setStringValue:lblTxt];
         //[entityCell setDataCount:[NSString stringWithFormat:@"%ld", [self.coreDataIntrospection entityDataCountAtIndex:row]]];
         [[entityCell countButton] setTitle: [NSString stringWithFormat:@"%ld", [self.coreDataIntrospection entityDataCountAtIndex:row]]];
         //[[entityCell countButton] sizeToFit];
         [[entityCell countButton] setEnabled:NO];
-        
         return entityCell;
     }
-    
-    if (tableView == [self entityContentTable])
-    {
-        id valueObj = [self getValueObjFromDataRows:tableView :row :tableColumn];
-        
-        if (valueObj == nil)
-        {
-            MFLTextTableCellView* textCell = [MFLCellBuilder nullCell:tableView owner:self];
-            return textCell;
+
+    // -- entity table --
+
+    // check cache for view data
+    NSMutableDictionary *columnMap = self.cachedRows[@(row)];
+    if (columnMap != nil) {
+        ViewData *viewData = columnMap[tableColumn.identifier];
+        if (viewData != nil) {
+            return [self createCell:viewData.text withType:viewData.viewType];
         }
-        else if ([valueObj isKindOfClass:[NSString class]])
-        {
-            NSString* cellText = [NSString stringWithFormat:@"%@", valueObj];
-            MFLTextTableCellView* textCell = [MFLCellBuilder textCellWithString:tableView textToSet:cellText owner:self];
-            return textCell;
-        }
-        else if ([valueObj isKindOfClass:[NSURL class]])
-        {
-            NSURL* url = (NSURL*) valueObj;
-            NSString* cellText = [NSString stringWithFormat:@"%@", [url absoluteString]];
-            MFLTextTableCellView* textCell = [MFLCellBuilder textCellWithString:tableView textToSet:cellText owner:self];
-            return textCell;
-        }
-        else if ([valueObj isKindOfClass:[NSDate class]])
-        {
-            NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-            [dateFormatter setDateStyle:self.dateStyle];
-            [dateFormatter setTimeStyle:self.dateStyle];
-            NSString *cellText = [dateFormatter stringFromDate:valueObj];
-            MFLTextTableCellView* textCell = [MFLCellBuilder textCellWithString:tableView textToSet:cellText owner:self];
-            
-            return textCell;
-        }
-        else if ([valueObj isKindOfClass:[NSData class]])
-        {
-            NSString* cellText = [NSString stringWithFormat:@"%ld", [valueObj length]];
-            MFLTextTableCellView* textCell = [MFLCellBuilder numberCellWithString:tableView textToSet:cellText owner: self];
-            return textCell;
-        }
-        else if ([valueObj isKindOfClass:[NSNumber class]])
-        {
-            NSString* cellText = [NSString stringWithFormat:@"%@", valueObj];
-            MFLTextTableCellView* textCell = [MFLCellBuilder numberCellWithString:tableView textToSet:cellText owner:self];
-            return textCell;
-        }
-        
-        // Button Cells
-        else if ([valueObj isKindOfClass:[NSManagedObject class]])
-        {
-            NSString* cellText = [NSString stringWithFormat:@"%@", [[valueObj entity] name]];
-            MFLButtonTableViewCell* buttonCell = [MFLCellBuilder objectCellWithString:tableView textToSet:cellText owner:self];
-            return buttonCell;
-        }
-        else if ([valueObj isKindOfClass:[NSSet class]])
-        {
-            if ([valueObj count] > 0)
-            {
-                NSManagedObject* object = [valueObj anyObject];
-                NSString *cellText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
-                
-                MFLButtonTableViewCell* buttonCell = [tableView makeViewWithIdentifier:MFL_BUTTON_CELL owner:self];
-                [[buttonCell infoField] setAlignment:NSRightTextAlignment];
-                [[buttonCell infoField] setTextColor:[NSColor blackColor]];
-                [[buttonCell infoField] setStringValue: cellText];
-                return buttonCell;
-            }
-            else // Empty NSSet
-            {
-                MFLTextTableCellView* textCell = [MFLCellBuilder nullCell:tableView owner:self];
-                return textCell;
-            }            
-        }
-        else if ([valueObj isKindOfClass:[NSArray class]])
-        {
-            if ([valueObj count] > 0)
-            {
-                NSManagedObject* object = [valueObj firstItem];
-                NSString *cellText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
-                
-                MFLButtonTableViewCell* buttonCell = [tableView makeViewWithIdentifier:MFL_BUTTON_CELL owner:self];
-                [[buttonCell infoField] setAlignment:NSRightTextAlignment];
-                [[buttonCell infoField] setTextColor:[NSColor blackColor]];
-                [[buttonCell infoField] setStringValue: cellText];
-                return buttonCell;
-            }
-            else // Empty NSArray
-            {
-                MFLTextTableCellView* textCell = [MFLCellBuilder nullCell:tableView owner:self];
-                return textCell;
-            }
-        }
-        else if ([valueObj isKindOfClass:[NSOrderedSet class]])
-        {
-            
-            if ([valueObj count] > 0)
-            {
-                NSManagedObject* object = [valueObj firstObject];
-                NSString *cellText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
-                
-                MFLButtonTableViewCell* buttonCell = [tableView makeViewWithIdentifier:MFL_BUTTON_CELL owner:self];
-                [[buttonCell infoField] setAlignment:NSRightTextAlignment];
-                [[buttonCell infoField] setTextColor:[NSColor blackColor]];
-                [[buttonCell infoField] setStringValue: cellText];
-                return buttonCell;
-            }
-            else // Empty NSSet
-            {
-                MFLTextTableCellView* textCell = [MFLCellBuilder nullCell:tableView owner:self];
-                return textCell;
-            }
-        }
-        // Unhandled types of content
-        else 
-        {
-            NSLog(@"is Other");
-            
-            NSString* cellText = [NSString stringWithFormat:@"??? %@ ???", [valueObj class]];
-            MFLTextTableCellView* textCell = [MFLCellBuilder numberCellWithString:tableView textToSet:cellText owner:self];
-            [[textCell infoField] setTextColor:[NSColor redColor]];
-            
-            return textCell;
-        } 
     }
-    
-    return nil;
+
+    NSString *viewText = nil;
+    EViewType viewType = ViewTypeString;
+
+    id valueObj = [self getValueObjFromDataRows:tableView :row :tableColumn];
+    if (valueObj == nil) {
+        // do nothing..
+    }
+    else if ([valueObj isKindOfClass:[NSString class]]) {
+        viewType = ViewTypeString;
+        viewText = valueObj;
+        if (viewText.length > MAX_TEXT_LENGTH) {
+            viewText = [viewText substringToIndex:MAX_TEXT_LENGTH];
+        }
+
+        if ([viewText hasPrefix:@"http"]) {
+            viewType = ViewTypeLink;
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSNumber class]]) {
+        viewType = ViewTypeNumber;
+        NSNumber *number = valueObj;
+        // get 'type' of NSNumber to determine if this is a Boolean data type
+        if (strcmp(number.objCType, @encode(BOOL)) == 0) {
+            viewText = [NSString stringWithFormat:@"%@", number.boolValue ? @"YES" : @"NO"];
+        }
+        else {
+            viewText = [NSString stringWithFormat:@"%@", valueObj];
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSDate class]]) {
+        viewType = ViewTypeDate;
+        [self setupDateFormatter];
+        if (self.dateStyle == NSDateFormatterShortStyle) {
+            viewText = [valueObj timeAgo];
+
+        } else {
+            viewText = [self.dateFormatter stringFromDate:valueObj];
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSURL class]]) {
+        viewType = ViewTypeLink;
+        NSURL* url = (NSURL*) valueObj;
+        viewText = [NSString stringWithFormat:@"%@", [url absoluteString]];
+    }
+    else if ([valueObj isKindOfClass:[NSData class]]) {
+        viewType = ViewTypeNumber;
+        viewText = [NSString stringWithFormat:@"%ld", [valueObj length]];
+    }
+    else if ([valueObj isKindOfClass:[NSManagedObject class]]) {
+        viewText = [NSString stringWithFormat:@"%@", [[valueObj entity] name]];
+    }
+    else if ([valueObj isKindOfClass:[NSSet class]]) {
+        if ([valueObj count] > 0) {
+            id obj = [valueObj anyObject];
+            if ([obj isKindOfClass:[NSManagedObject class]]) {
+                viewType = ViewTypeLink;
+                NSManagedObject* object = obj;
+                viewText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
+            } else {
+                viewText = [NSString stringWithFormat:@"%@", valueObj];
+            }
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSArray class]]) {
+        if ([valueObj count] > 0) {
+            id obj = [valueObj firstItem];
+            if ([obj isKindOfClass:[NSManagedObject class]]) {
+                viewType = ViewTypeLink;
+                NSManagedObject* object = obj;
+                viewText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
+            } else {
+                viewText = [NSString stringWithFormat:@"%@", valueObj];
+            }
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSOrderedSet class]]) {
+        if ([valueObj count] > 0) {
+            id obj = [valueObj firstObject];
+            if ([obj isKindOfClass:[NSManagedObject class]]) {
+                viewType = ViewTypeLink;
+                NSManagedObject* object = obj;
+                viewText = [NSString stringWithFormat:@"%@[%ld]", [[object entity] name], [valueObj count]];
+            } else {
+                viewText = [NSString stringWithFormat:@"%@", valueObj];
+            }
+        }
+    }
+    else if ([valueObj isKindOfClass:[NSDictionary class]]) {
+        viewType = ViewTypeTransformable;
+        viewText = [NSString stringWithFormat:@"%@", @"NSDictionary Data"];
+    }
+    else {
+        NSLog(@"Unknown content: %@", valueObj);
+        viewText = [NSString stringWithFormat:@"??? %@ ???", [valueObj class]];
+    }
+
+    // cache text and type
+    if (columnMap == nil) {
+        columnMap = [NSMutableDictionary new];
+        self.cachedRows[@(row)] = columnMap;
+    }
+    ViewData *viewData = [ViewData new];
+    viewData.text = viewText;
+    viewData.viewType = viewType;
+    columnMap[tableColumn.identifier] = viewData;
+
+    // create cell from text and type
+    return [self createCell:viewText withType:viewType];
+}
+
+- (NSTableCellView *)createCell:(NSString *)text withType:(EViewType)type {
+    // using different identifiers for view types to minimize changes to a cells layout for reuse
+    NSString *identifier;
+    if (type == ViewTypeLink) {
+        identifier = @"LINK";
+    }
+    else if (type == ViewTypeTransformable) {
+        identifier = @"TRANSFORM";
+    }
+    else {
+        identifier = @"TEXT";
+    }
+    MFLTextTableCellView *textCell = [self.entityContentTable makeViewWithIdentifier:identifier owner:self];
+    if (textCell == nil) {
+        NSLog(@"creating: %d", (int)type);
+        textCell = [MFLTextTableCellView new];
+        textCell.identifier = identifier;
+        textCell.wantsLayer = YES;
+    }
+
+    textCell.viewType = type;
+    textCell.text = text;
+
+    return textCell;
+}
+
+- (void)setupDateFormatter {
+    if (self.dateFormatter == nil) {
+        self.dateFormatter = [[NSDateFormatter alloc] init];
+        switch (self.dateStyle) {
+            case NSDateFormatterShortStyle:
+                [self.dateFormatter setDateFormat:@"M/d/YY h:mm a"];
+                break;
+            case NSDateFormatterMediumStyle:
+                [self.dateFormatter setDateFormat:@"MM/dd/YY hh:mm a"];
+                break;
+            default:
+                // use original formatting
+                [self.dateFormatter setDateStyle:self.dateStyle];
+                [self.dateFormatter setTimeStyle:self.dateStyle];
+                break;
+        }
+    }
 }
 
 #pragma mark - Outline view
@@ -560,13 +608,13 @@
 		if ([self.rootNode.childs[1] hasChild:node]) {
 			cell = [outlineView makeViewWithIdentifier:@"DataCell" owner:self];
 			cell.textField.stringValue = node.title;
-			cell.imageView.image = [NSImage imageNamed:@"Fetch_Small"];
+			cell.imageView.image = [CoreDataUtilityStyle imageOfFetch];
 			NSButton *button = [cell viewWithTag:1];
 			[button removeFromSuperview];
 		} else {
 			cell = [outlineView makeViewWithIdentifier:@"DataCell" owner:self];
 			cell.textField.stringValue = node.title;
-			cell.imageView.image = [NSImage imageNamed:@"Entity_Small"];
+			cell.imageView.image = [CoreDataUtilityStyle imageOfEntity];
 			NSButton *button = [cell viewWithTag:1];
 			button.title = [NSString stringWithFormat:@"%d", node.badgeValue];
 		}
@@ -610,11 +658,11 @@
     [self.rootNode addChild:entitiesNode];
 	
     NSUInteger entityCount = self.coreDataIntrospection.entityCount;
-    for(NSUInteger i=0; i<entityCount; i++) {
+    for(int i=0; i<entityCount; i++) {
         OutlineViewNode *node = [OutlineViewNode new];
         node.title = [self.coreDataIntrospection entityAtIndex:i];
         node.index = i;
-        node.badgeValue = [self.coreDataIntrospection entityDataCountAtIndex:i];
+        node.badgeValue = (int)[self.coreDataIntrospection entityDataCountAtIndex:i];
         [entitiesNode addChild:node];
     }
     
@@ -623,7 +671,7 @@
     fetchRequestNode.index = 1;
     [self.rootNode addChild:fetchRequestNode];
 	
-	for(NSUInteger i=0; i<self.coreDataIntrospection.fetchRequestCount; i++) {
+	for(int i=0; i<self.coreDataIntrospection.fetchRequestCount; i++) {
         OutlineViewNode *node = [OutlineViewNode new];
         node.title = [self.coreDataIntrospection fetchRequestAtIndex:i];
         node.index = i;
@@ -647,8 +695,106 @@
 
     [self.entityContentTable reloadData];
     [self enableDisableHistorySegmentedControls];
-    
+
+    self.projectFile = nil;
+
     return YES;
+}
+
+- (BOOL) openProject:(NSString *)filename
+{
+    NSLog(@"Load Project File: [%@]", filename);
+    NSDictionary* project = [NSDictionary dictionaryWithContentsOfFile:filename];
+    NSString* momFilePath = project[MFL_MOM_FILE_KEY];
+    NSString* dbFilePath = project[MFL_DB_FILE_KEY];
+    NSNumber* persistenceFormat = project[MFL_DB_FORMAT_KEY];
+    if (persistenceFormat == nil) {
+        persistenceFormat = @(MFL_SQLiteStoreType);
+    }
+
+    NSURL* momUrl = nil;
+    NSURL* dbUrl = nil;
+    if (momFilePath != nil) {
+        momUrl = [NSURL URLWithString:momFilePath];
+    }
+
+    if (dbFilePath != nil) {
+        dbUrl = [NSURL URLWithString:dbFilePath];
+    }
+
+    // if iOS, check if file exists otherwise search for it because it may have moved.
+    NSError *err;
+    if (![momUrl checkResourceIsReachableAndReturnError:&err]) {
+        // is iOS Simulator?
+        NSRange pathRange = [momFilePath rangeOfString:APPLICATIONS_DIR];
+        if (pathRange.location != NSNotFound) {
+            // This is an iOS simulator project
+            NSLog(@"momPath: %@", momFilePath);
+            NSString* applicationsPath = [self convertToIosApplicationsBasePath:momFilePath];
+            NSString* relativeMomPath = [self convertToApplicationPath:momFilePath];
+            NSString* relativeDBPath = [self convertToApplicationPath:dbFilePath];
+
+            // Scan through UUID directories to see if any match our paths
+            // Search through each UUID to find our files
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            NSError* error;
+            NSArray* contents = [fileManager contentsOfDirectoryAtURL:[NSURL URLWithString:applicationsPath] includingPropertiesForKeys:@[NSURLFileResourceTypeDirectory] options:0 error:&error];
+            for (NSString* content in contents) {
+                NSLog(@"Found: %@", content);
+                NSString* testMomPath = [NSString stringWithFormat:@"%@%@",content, relativeMomPath];
+                NSURL* testMomUrl = [NSURL URLWithString:testMomPath];
+                if ([testMomUrl checkResourceIsReachableAndReturnError:&err] == NO) {
+                    continue;
+                }
+
+                NSString* testDBPath = [NSString stringWithFormat:@"%@%@", content, relativeDBPath];
+                NSURL* testDBUrl = [NSURL URLWithString:testDBPath];
+                if ([testDBUrl checkResourceIsReachableAndReturnError:&err] == NO) {
+                    continue;
+                }
+
+                // Both files exist so use this path instead.
+                momFilePath = testMomPath;
+                dbFilePath = testDBPath;
+
+                momUrl = [NSURL URLWithString:momFilePath];
+                dbUrl = [NSURL URLWithString:dbFilePath];
+
+                // Exit for loop
+                break;
+            }
+        }
+    }
+
+    BOOL isOk = [self openFiles:momUrl persistenceFile:dbUrl persistenceType:persistenceFormat];
+    if (isOk) {
+        self.projectFile = filename;
+    }
+    return isOk;
+}
+
+- (NSString*) convertToIosApplicationsBasePath:(NSString*) filePath {
+    NSRange pathRange = [filePath rangeOfString:APPLICATIONS_DIR];
+    if (pathRange.location == NSNotFound) {
+        return nil;
+    }
+
+    return [filePath substringToIndex:pathRange.location+pathRange.length];
+}
+
+- (NSString*) convertToApplicationPath:(NSString*) filePath {
+    NSRange pathRange = [filePath rangeOfString:APPLICATIONS_DIR];
+    if (pathRange.location == NSNotFound) {
+        return nil;
+    }
+
+    NSUInteger len = ((pathRange.location+pathRange.length) +36);
+
+    if ([filePath length] <= len) {
+        return nil;
+    }
+
+    return [filePath substringFromIndex:len];
 }
 
 - (void) openCoreDataIntrospectionWithUrls: (NSURL*) momFileUrl persistFileUrl:(NSURL*) persistFileUrl persistFormat:(NSInteger) persistFormat {
@@ -764,6 +910,10 @@
 {
     //NSLog(@"getInfoAction");
     NSInteger selected = [[self dataSourceList] getRightClickedRow] - 1;
+    if (selected < 0) {
+        NSLog(@"getInfoAction: bad index:%d", (int)selected);
+        return;
+    }
     NSEntityDescription* entityDescription = [self.coreDataIntrospection entityDescription:selected];
     
     GetInfoSheetController* infoSheetController = [[GetInfoSheetController alloc] initWithWindowNibName:@"GetInfoSheetController"];
@@ -805,6 +955,21 @@
     [self.entityContentTable reloadData];
     [self.dataSourceList deselectRow:[self.dataSourceList selectedRow]];
 }
+
+- (IBAction)infoCellButtonClicked:(id)sender
+{
+    NSInteger row = [self.entityContentTable rowForView:sender];
+    NSInteger column = [self.dataSourceList columnForView:sender];
+    NSArray *columns = [self.entityContentTable tableColumns];
+    
+    id valueObj = [self getValueObjFromDataRows:self.entityContentTable :row :columns[column]];
+    
+    if (valueObj != nil) {
+        ObjectInfoController* infoSheetController = [[ObjectInfoController alloc] initWithWindowNibName:@"ObjectInfoController"];
+        [infoSheetController show:self.window objectDescription:[valueObj description]];
+    }
+}
+
 
 - (IBAction)entityCellButtonClicked:(id)sender
 {
@@ -848,6 +1013,16 @@
             [self.coreDataIntrospection updateCoreDataHistory:[[[set firstObject] entity] name] predicate:predicate objectType:MFLObjectTypeEntity];
             [self enableDisableHistorySegmentedControls];
         }
+        else if ([valueObj isKindOfClass:[NSString class]]) {
+            NSString *string = valueObj;
+            if ([string hasPrefix:@"http"]) {
+                [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:string]];
+            }
+        }
+        else if ([valueObj isKindOfClass:[NSURL class]]) {
+            NSURL *url = valueObj;
+            [[NSWorkspace sharedWorkspace] openURL:url];
+        }
     }
 }
 
@@ -881,13 +1056,29 @@
 
 - (IBAction) refreshItemSelected:(id)sender
 {
-    //NSLog(@"refreshItemSelected [%@]", sender);
-    if (self.coreDataIntrospection != nil)
-    {
+    if (self.coreDataIntrospection == nil) {
+        return;
+    }
+    // backup last selected entity
+    NSInteger selectedRow = [self.dataSourceList selectedRow];
+
+    NSLog(@"refreshItemSelected: selectedRow:%d", (int)selectedRow);
+
+    // if loaded from project file, reload from same file. allows updating URL's in project file while running
+    if (self.projectFile != nil) {
+        [self openProject:self.projectFile];
+    }
+    else {
         [self.coreDataIntrospection reloadObjectModel];
-		[self configureOutlineViewNodes];
+        [self configureOutlineViewNodes];
         [self.entityContentTable reloadData];
         [self enableDisableHistorySegmentedControls];
+    }
+
+    if (selectedRow >= 0) {
+        // restore selection
+        [self.dataSourceList selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger) selectedRow] byExtendingSelection:NO];
+        [self onEntitySelected];
     }
 }
 
@@ -928,6 +1119,11 @@
     }
     
     [[NSUserDefaults standardUserDefaults] setInteger:self.dateStyle forKey:DATE_STYLE_KEY_NAME];
+
+    // clear cache
+    [self.cachedRows removeAllObjects];
+
+    self.dateFormatter = nil;
     
     if (self.entityContentTable != nil) {
         [self.entityContentTable reloadData];

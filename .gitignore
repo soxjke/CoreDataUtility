@@ -1,4 +1,5 @@
 # Xcode
+MFLBuild.m-e
 .DS_Store
 build/
 *.pbxuser
@@ -15,3 +16,6 @@ xcuserdata
 profile
 *.moved-aside
 DerivedData
+
+# IDEA (IntelliJ/AppCode) settings
+.idea
